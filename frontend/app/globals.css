@@ -1,0 +1,171 @@
+/* ── Google Fonts (must precede all other rules) ───────────────────────────── */
+@import url("https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300..900;1,14..32,300..900&display=swap");
+
+@import "tailwindcss";
+
+/* ══════════════════════════════════════════════════════════════════════════
+   CAMPUSFIND AI — DESIGN SYSTEM
+   Signature identity: indigo → violet → fuchsia "AI gradient", used only for
+   AI-specific moments (search, match score, hero glow) — never everywhere.
+   ══════════════════════════════════════════════════════════════════════════ */
+:root {
+  /* Brand */
+  --accent: #6366f1;
+  --accent-hover: #4f46e5;
+  --accent-light: #eef2ff;
+  --accent-ring: rgba(99, 102, 241, 0.2);
+
+  /* AI gradient triad — the one recognizably "CampusFind" visual signature */
+  --ai-from: #4f46e5;   /* indigo-600 */
+  --ai-via:  #7c3aed;   /* violet-600 */
+  --ai-to:   #c026d3;   /* fuchsia-600 */
+  --ai-gradient: linear-gradient(135deg, var(--ai-from) 0%, var(--ai-via) 55%, var(--ai-to) 100%);
+  --ai-gradient-soft: linear-gradient(135deg, rgba(79,70,229,0.12) 0%, rgba(124,58,237,0.12) 55%, rgba(192,38,211,0.12) 100%);
+
+  /* Surface */
+  --bg-page: #ffffff;
+  --bg-subtle: #f8fafc;
+  --bg-card: #ffffff;
+
+  /* Border */
+  --border: #e2e8f0;
+  --border-focus: #6366f1;
+
+  /* Text */
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+
+  /* Shadow — soft, premium, never harsh */
+  --shadow-sm: 0 1px 3px rgba(15,23,42,0.06), 0 1px 2px rgba(15,23,42,0.04);
+  --shadow-md: 0 4px 12px rgba(15,23,42,0.08), 0 2px 4px rgba(15,23,42,0.04);
+  --shadow-lg: 0 12px 32px rgba(15,23,42,0.10), 0 4px 10px rgba(15,23,42,0.05);
+  --shadow-glow: 0 8px 30px rgba(99,102,241,0.20);
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-page);
+  color: var(--text-primary);
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.6;
+}
+
+/* Consistent, visible focus ring everywhere (accessibility) */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ── Category badge colours ────────────────────────────────────────────────── */
+.badge-hackathon    { background: #ede9fe; color: #6d28d9; }
+.badge-internship   { background: #dcfce7; color: #15803d; }
+.badge-workshop     { background: #fef9c3; color: #a16207; }
+.badge-competition  { background: #fce7f3; color: #9d174d; }
+.badge-conference   { background: #e0f2fe; color: #0369a1; }
+.badge-scholarship  { background: #fff7ed; color: #c2410c; }
+.badge-online       { background: #f1f5f9; color: #475569; }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SIGNATURE COMPONENTS
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Gradient-filled text — for the ONE emphasis word/phrase per screen */
+.ai-gradient-text {
+  background: var(--ai-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* The AI Match pill — one recognizable shape used everywhere a match score appears */
+.ai-match-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: var(--ai-gradient);
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 2px 10px rgba(124,58,237,0.28);
+}
+
+/* Soft glow blob for hero / AI-emphasis backgrounds — tasteful, blurred, never sharp */
+.ai-glow {
+  background: var(--ai-gradient);
+  filter: blur(90px);
+  opacity: 0.25;
+}
+
+/* Card premium lift on hover */
+.card-lift {
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+.card-lift:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lg);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ANIMATIONS — tasteful, quick, respects prefers-reduced-motion (see above)
+   ══════════════════════════════════════════════════════════════════════════ */
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in-up {
+  animation: fadeInUp 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes floatSlow {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-10px); }
+}
+.animate-float-slow {
+  animation: floatSlow 6s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
+}
+.skeleton-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.skeleton-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.55), transparent);
+  animation: shimmer 1.6s infinite;
+}
+
+@keyframes popIn {
+  0%   { transform: scale(0.85); opacity: 0; }
+  60%  { transform: scale(1.06); opacity: 1; }
+  100% { transform: scale(1); }
+}
+.animate-pop {
+  animation: popIn 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}

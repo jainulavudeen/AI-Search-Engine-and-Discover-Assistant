@@ -1,0 +1,191 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Enums ──────────────────────────────────────────────────────────────────────
+
+enum Category {
+  HACKATHON
+  INTERNSHIP
+  WORKSHOP
+  COMPETITION
+  CONFERENCE
+  SCHOLARSHIP
+}
+
+enum Mode {
+  ONLINE
+  OFFLINE
+  HYBRID
+}
+
+enum Role {
+  STUDENT
+  ADMIN
+}
+
+enum InteractionType {
+  VIEW
+  BOOKMARK
+  REGISTER_CLICK
+  RECOMMENDATION_CLICK
+}
+
+// ── Models ────────────────────────────────────────────────────────────────────
+
+model User {
+  id                  String   @id @default(cuid())
+  name                String
+  email               String   @unique
+  passwordHash        String
+  role                Role     @default(STUDENT)
+  college             String?
+  // Onboarding fields
+  course              String?
+  year                Int?
+  interests           String[]
+  preferredLocations  String[]
+  opportunityTypes    String[]
+  onboardingCompleted Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  bookmarks       Bookmark[]
+  searchHistory   SearchInteraction[]
+  recommendations Recommendation[]
+  interactions    OpportunityInteraction[]
+
+  @@index([email])
+}
+
+model Opportunity {
+  id                   String    @id @default(cuid())
+  title                String
+  description          String
+  category             Category
+  location             String
+  mode                 Mode
+  startDate            DateTime
+  endDate              DateTime?
+  registrationDeadline DateTime
+  organizer            String
+  eligibility          String
+  skills               String[]
+  tags                 String[]
+  registrationUrl      String
+  relevanceScore       Int       @default(70)
+  featured             Boolean   @default(false)
+
+  // Admin soft-close: false hides the opportunity from student-facing
+  // browse/search/recommendations without deleting the record. Distinct
+  // from a naturally passed registrationDeadline (see computeStatus()).
+  isActive             Boolean   @default(true)
+
+  // Whether registration is free to enter. Left null when unknown — never
+  // inferred from free-text tags/description, which are unreliable for this.
+  isFree               Boolean?
+
+  // ── External source tracking ────────────────────────────────────────────────
+  // source: name of the external API (e.g. "brabble")
+  // sourceId: unique ID from the external API (used for deduplication)
+  // externalUpdatedAt: timestamp from the external API's last-updated field
+  source               String?
+  sourceId             String?
+  externalUpdatedAt    DateTime?
+
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  bookmarks       Bookmark[]
+  recommendations Recommendation[]
+  interactions    OpportunityInteraction[]
+
+  @@unique([source, sourceId])   // prevent duplicate external imports
+  @@index([category])
+  @@index([location])
+  @@index([mode])
+  @@index([registrationDeadline])
+  @@index([featured])
+  @@index([source])
+  @@index([isFree])
+  @@index([isActive])
+}
+
+model Bookmark {
+  id            String      @id @default(cuid())
+  userId        String
+  opportunityId String
+  createdAt     DateTime    @default(now())
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opportunity Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, opportunityId])
+  @@index([userId])
+  @@index([opportunityId])
+}
+
+model SearchInteraction {
+  id               String   @id @default(cuid())
+  userId           String?
+  query            String
+  interpretedIntent Json?
+  resultsCount     Int      @default(0)
+  // Denormalized copies of the category/location involved in this search or
+  // filter event (explicit filter takes priority over LLM-inferred intent —
+  // same precedence as the search itself). Flat columns, not parsed out of
+  // interpretedIntent JSON, so "most searched categories/locations" admin
+  // analytics can use a plain groupBy instead of JSON aggregation.
+  category         Category?
+  location         String?
+  createdAt        DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([createdAt])
+  @@index([category])
+  @@index([location])
+}
+
+// One row per tracked interaction — lightweight, append-only, aggregate-
+// analytics-oriented (Phase 16). userId is nullable so anonymous browsing
+// (e.g. viewing a detail page while logged out) can still count toward
+// opportunity-level popularity without forcing an account. No free-text or
+// otherwise sensitive fields are stored here — just what/who/when.
+model OpportunityInteraction {
+  id            String           @id @default(cuid())
+  userId        String?
+  opportunityId String
+  type          InteractionType
+  createdAt     DateTime         @default(now())
+
+  user        User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  opportunity Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([opportunityId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model Recommendation {
+  id            String      @id @default(cuid())
+  userId        String
+  opportunityId String
+  score         Float
+  reason        String
+  createdAt     DateTime    @default(now())
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opportunity Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, opportunityId])
+  @@index([userId])
+  @@index([score])
+}
