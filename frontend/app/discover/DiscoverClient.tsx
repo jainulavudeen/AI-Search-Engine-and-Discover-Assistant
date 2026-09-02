@@ -111,6 +111,31 @@ const QUICK_FILTERS: {
   },
 ];
 
+// Shown in the on-focus suggestions dropdown when the search box is empty —
+// a representative spread of what the NL parser actually handles well.
+const EXAMPLE_QUERIES = [
+  "AI hackathons in Chennai this month",
+  "Remote internships for CSE students",
+  "Online cybersecurity competitions",
+  "Free workshops for engineering students",
+];
+
+// Shared with the Dashboard's AI Assistant card so "recent searches" means
+// the same thing everywhere in the app, not a per-page history.
+const RECENT_SEARCHES_KEY = "recent_searches";
+const MAX_RECENT_SEARCHES = 5;
+
+function saveRecentSearch(query: string) {
+  try {
+    const existing: string[] = JSON.parse(localStorage.getItem(RECENT_SEARCHES_KEY) ?? "[]");
+    const updated = [query, ...existing.filter((s) => s !== query)].slice(0, MAX_RECENT_SEARCHES);
+    localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(updated));
+    return updated;
+  } catch {
+    return [];
+  }
+}
+
 // ── AI Status Banner ───────────────────────────────────────────────────────────
 
 type SearchStatus =
@@ -381,6 +406,8 @@ export default function DiscoverClient() {
   const [sort, setSort] = useState<SortOption>(initialState.sort);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // AI search state
   const [searchStatus, setSearchStatus] = useState<SearchStatus>({ type: "idle" });
@@ -502,7 +529,30 @@ export default function DiscoverClient() {
     if (initialQuery) {
       runAiSearch(initialQuery, filters);
     }
+    try {
+      setRecentSearches(JSON.parse(localStorage.getItem(RECENT_SEARCHES_KEY) ?? "[]"));
+    } catch {
+      // ignore
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // "/" focuses the search box, like most search-first products — but never
+  // hijacks typing that's already happening in another field.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      const isTyping = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if (e.key === "/" && !isTyping) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+      if (e.key === "Escape" && target === searchInputRef.current) {
+        searchInputRef.current?.blur();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   // External query changes (Navbar search while already on /discover,
@@ -549,9 +599,14 @@ export default function DiscoverClient() {
 
   // ── Handlers ───────────────────────────────────────────────────────────────
 
-  const handleSearch = () => {
-    const q = inputValue.trim();
+  const handleSearch = (explicitQuery?: string) => {
+    const q = (explicitQuery ?? inputValue).trim();
+    if (explicitQuery !== undefined) setInputValue(explicitQuery);
+    if (!q) return;
     setQuery(q);
+    setRecentSearches(saveRecentSearch(q));
+    setSearchFocused(false);
+    searchInputRef.current?.blur();
     const params = filtersToSearchParams(filters, sort, q);
     router.push(params.toString() ? `/discover?${params.toString()}` : "/discover");
   };
@@ -631,6 +686,7 @@ export default function DiscoverClient() {
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
               </svg>
               <input
+                ref={searchInputRef}
                 id="discover-search"
                 type="text"
                 value={inputValue}
@@ -643,6 +699,9 @@ export default function DiscoverClient() {
                 aria-label="Search opportunities with AI"
                 autoComplete="off"
               />
+              {!searchFocused && !inputValue && (
+                <kbd className="hidden sm:inline-flex flex-shrink-0 items-center justify-center w-5 h-5 text-[10px] font-semibold text-slate-400 bg-slate-100 border border-slate-200 rounded">/</kbd>
+              )}
               {inputValue && (
                 <button
                   aria-label="Clear search"
@@ -666,7 +725,7 @@ export default function DiscoverClient() {
               )}
               <button
                 id="discover-search-btn"
-                onClick={handleSearch}
+                onClick={() => handleSearch()}
                 disabled={
                   searchStatus.type === "understanding" ||
                   searchStatus.type === "searching"
@@ -703,6 +762,50 @@ export default function DiscoverClient() {
                 )}
               </button>
             </div>
+
+            {/* Suggestions — recent searches + example queries, shown only
+                while the box is empty and focused. onMouseDown/preventDefault
+                on the wrapper stops the click from blurring the input first
+                (the classic "dropdown closes before the click registers" bug). */}
+            {searchFocused && !inputValue && (recentSearches.length > 0 || EXAMPLE_QUERIES.length > 0) && (
+              <div
+                onMouseDown={(e) => e.preventDefault()}
+                className="absolute left-0 right-0 top-full mt-2 bg-white border border-slate-200 rounded-xl shadow-lg shadow-slate-200/60 p-2 z-40 animate-fade-in-up"
+              >
+                {recentSearches.length > 0 && (
+                  <div className="mb-1.5">
+                    <p className="px-2.5 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wide">Recent</p>
+                    {recentSearches.map((q) => (
+                      <button
+                        key={q}
+                        onClick={() => handleSearch(q)}
+                        className="w-full flex items-center gap-2.5 px-2.5 py-2 text-[13px] text-slate-700 hover:bg-slate-50 rounded-lg transition-colors text-left"
+                      >
+                        <svg className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <span className="truncate">{q}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div>
+                  <p className="px-2.5 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wide">Try asking</p>
+                  {EXAMPLE_QUERIES.map((q) => (
+                    <button
+                      key={q}
+                      onClick={() => handleSearch(q)}
+                      className="w-full flex items-center gap-2.5 px-2.5 py-2 text-[13px] text-slate-600 hover:bg-violet-50 hover:text-violet-700 rounded-lg transition-colors text-left"
+                    >
+                      <svg className="w-3.5 h-3.5 text-violet-400 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                      </svg>
+                      <span className="truncate">{q}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Quick filters — one tap toward the most common refinements */}

@@ -175,7 +175,7 @@ function buildFallbackSourceId(event: BrabbleEvent): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .slice(0, 60);
-  const orgSlug = (event.organizer ?? "")
+  const orgSlug = (event.organiser ?? "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .slice(0, 30);
@@ -193,52 +193,66 @@ function normalize(event: BrabbleEvent): NormalizedOpportunity | null {
   // Required: title
   if (!event.title?.trim()) return null;
 
-  const location = normalizeLocation(event.location, event.city, event.country);
+  const location = normalizeLocation(undefined, event.city, undefined);
   const mode = normalizeMode(event.mode);
-  const category = normalizeCategory(event.category ?? event.hub);
+  // The live API's one hub ("hackathons") tags every listing type:"HACKATHON" —
+  // normalizeCategory already lowercase-matches that directly.
+  const category = normalizeCategory(event.type);
 
   // If mode says Online but location is a city, trust mode
   const finalLocation =
     mode === Mode.ONLINE ? "Online" : location;
 
-  // Dates — startDate is required; use today+7d as last resort
-  const startDate = parseDate(event.startDate) ?? new Date(Date.now() + 7 * 86400_000);
-  const endDate = parseDate(event.endDate);
+  // The API only ever gives a registration deadline, never a separate event
+  // start date — using the deadline itself is a more honest default than an
+  // arbitrary "7 days from now" guess.
+  const registrationDeadline = parseDate(event.deadline) ?? new Date(Date.now() + 7 * 86400_000);
+  const startDate = registrationDeadline;
 
-  // Registration deadline: use event deadline, or startDate if missing
-  const registrationDeadline =
-    parseDate(event.deadline) ?? parseDate(event.startDate) ?? startDate;
-
-  // URL
+  // URL — `url` is the real listing/registration link; `shareUrl` (a stable
+  // brabble.ai redirect) is the fallback if that's ever missing.
   const registrationUrl =
-    isValidUrl(event.registrationUrl)
-      ? event.registrationUrl!
-      : isValidUrl(event.url)
+    isValidUrl(event.url)
       ? event.url!
+      : isValidUrl(event.shareUrl)
+      ? event.shareUrl!
       : "https://brabble.ai";
 
   const sourceId = event.id?.trim() || buildFallbackSourceId(event);
-  const externalUpdatedAt = parseDate(event.updatedAt ?? event.createdAt) ?? undefined;
+
+  // eligibility comes back as a list (e.g. ["Undergraduate", "Engineering
+  // Students"]) — join it into the free-text field the rest of the app expects.
+  const eligibilityText = Array.isArray(event.eligibility) && event.eligibility.length > 0
+    ? event.eligibility.join(", ")
+    : "Open to all students";
+
+  // fee is a real, honest signal for isFree — "Free" means free, anything
+  // else is a real price string, so it's Paid. Never guessed when absent.
+  const isFree = typeof event.fee === "string"
+    ? event.fee.trim().toLowerCase() === "free"
+    : undefined;
+
+  const tags = [event.platform, event.prize?.label].filter((t): t is string => !!t && t.trim().length > 0);
 
   return {
     title: event.title.trim().slice(0, 255),
-    description: (event.description?.trim() || `${event.title.trim()} — discover this opportunity on CampusFind AI.`).slice(0, 2000),
+    description: `${event.title.trim()} — discover this opportunity on CampusFind AI.`.slice(0, 2000),
     category,
     location: finalLocation,
     mode,
     startDate,
-    endDate: endDate ?? undefined,
     registrationDeadline,
-    organizer: (event.organizer?.trim() || "External Organizer").slice(0, 200),
-    eligibility: (event.eligibility?.trim() || "Open to all students").slice(0, 500),
-    skills: Array.isArray(event.skills) ? event.skills.slice(0, 20) : [],
-    tags: Array.isArray(event.tags) ? event.tags.slice(0, 20) : [],
+    organizer: (event.organiser?.trim() || "External Organizer").slice(0, 200),
+    eligibility: eligibilityText.slice(0, 500),
+    skills: [],
+    tags: tags.slice(0, 20),
     registrationUrl,
     relevanceScore: 65,  // base score for external events
     featured: false,
+    isFree,
     source: "brabble",
     sourceId,
-    externalUpdatedAt: externalUpdatedAt ?? null,
+    externalUpdatedAt: null, // API doesn't provide a last-updated timestamp
   };
 }
 
@@ -277,6 +291,7 @@ async function upsertOpportunity(opp: NormalizedOpportunity): Promise<"created" 
         skills: opp.skills as string[],
         tags: opp.tags as string[],
         registrationUrl: opp.registrationUrl,
+        isFree: opp.isFree as boolean | undefined,
         externalUpdatedAt: opp.externalUpdatedAt,
       },
     });

@@ -2,7 +2,7 @@
  * eventApiClient.ts
  *
  * Low-level HTTP client for the Brabble AI Listings API.
- * https://brabble.ai/api/listings
+ * https://brabble.ai/api/listings — docs: https://brabble.ai/developers
  *
  * Responsibilities:
  *  - Handle authentication (Bearer token via BRABBLE_API_KEY env var)
@@ -12,40 +12,46 @@
  *
  * This module NEVER runs on the frontend. All requests are server-to-server.
  * The API key lives only in backend/.env and is never sent to the client.
+ *
+ * NOTE ON THE REAL RESPONSE SHAPE: this was originally written against an
+ * assumed API contract before the real key was available. The live API's
+ * actual shape (confirmed directly against https://brabble.ai/api/listings)
+ * differs from that assumption in two important ways this file now reflects:
+ *   1. The results array is called `listings`, not `data`.
+ *   2. Only the `hackathons` hub currently exists — `workshops` and
+ *      `competitions` both 404 with "Unknown hub". Every listing in that hub
+ *      is itself type "HACKATHON" / kind "competition".
+ * If Brabble adds more hubs later, add them to HUBS below — everything else
+ * (pagination, field mapping) already generalizes.
  */
 
-// ── Types returned by the Brabble API ────────────────────────────────────────
+// ── Types actually returned by the Brabble API ───────────────────────────────
 
 export interface BrabbleEvent {
   id: string;
   title: string;
-  description?: string;
-  category?: string;
-  hub?: string;         // e.g. "hackathons", "competitions"
-  organizer?: string;
-  location?: string;
+  organiser?: string;          // British spelling — that's the real field name
+  type?: string;                // e.g. "HACKATHON"
+  kind?: string;                // e.g. "competition"
+  platform?: string;            // e.g. "Unstop" — where the listing is hosted
+  url?: string;                 // the actual registration/listing page
+  shareUrl?: string;            // stable brabble.ai short link, always present
+  deadline?: string;            // registration deadline — the only date given
+  mode?: string;                // "ONLINE" | "OFFLINE" | "HYBRID"
   city?: string;
-  country?: string;
-  mode?: string;        // "online" | "offline" | "hybrid" | "virtual" | "in-person"
-  startDate?: string;
-  endDate?: string;
-  deadline?: string;    // registration deadline
-  registrationUrl?: string;
-  url?: string;         // fallback URL
-  tags?: string[];
-  skills?: string[];
-  prize?: string;
-  eligibility?: string;
-  updatedAt?: string;
-  createdAt?: string;
+  prize?: { label?: string; inr?: number | null };
+  team?: string;                // e.g. "1 to 4"
+  fee?: string;                 // "Free" or a price string
+  eligibility?: string[];       // e.g. ["Undergraduate", "Engineering Students"]
+  registered?: number;
 }
 
 export interface BrabblePage {
-  data: BrabbleEvent[];
+  listings: BrabbleEvent[];
   total?: number;
-  page?: number;
+  count?: number;
+  offset?: number;
   limit?: number;
-  hasMore?: boolean;
 }
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -89,10 +95,19 @@ async function fetchJson<T>(url: string): Promise<T> {
       throw new Error("Brabble API rate limit exceeded. Wait before retrying.");
     }
     if (!res.ok) {
-      throw new Error(`Brabble API returned HTTP ${res.status}: ${res.statusText}`);
+      // The API returns 200 with an {"error": "..."} body for bad params
+      // (e.g. an unknown hub) rather than a 4xx — surface that body's text
+      // when available so a config mistake is diagnosable from the logs.
+      const body = await res.json().catch(() => null);
+      const detail = body && typeof body === "object" && "error" in body ? `: ${(body as { error: string }).error}` : "";
+      throw new Error(`Brabble API returned HTTP ${res.status}${detail || `: ${res.statusText}`}`);
     }
 
-    return res.json() as Promise<T>;
+    const body = (await res.json()) as T & { error?: string };
+    if (body && typeof body === "object" && "error" in body && body.error) {
+      throw new Error(`Brabble API error: ${body.error}`);
+    }
+    return body;
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       throw new Error(`Brabble API request timed out after ${TIMEOUT_MS / 1000}s`);
@@ -122,23 +137,27 @@ export async function fetchAllEvents(hub = "hackathons"): Promise<BrabbleEvent[]
       break;
     }
 
-    const items = Array.isArray(result.data) ? result.data : [];
+    const items = Array.isArray(result.listings) ? result.listings : [];
     if (items.length === 0) break;  // no more data
 
     all.push(...items);
 
-    // Stop if the API says there's no more data
-    if (!result.hasMore || items.length < PAGE_SIZE) break;
+    // The API doesn't return a "hasMore" flag — a short page means we've
+    // reached the end (also stops us from looping past `total` needlessly).
+    if (items.length < PAGE_SIZE) break;
   }
 
   return all;
 }
 
 /**
- * Fetch from multiple hubs so we cover hackathons, workshops, competitions, etc.
+ * Fetch from every hub the API actually exposes. Currently that's just
+ * "hackathons" — Promise.allSettled means adding a hub here that turns out
+ * to be invalid degrades gracefully (logged, not thrown) rather than
+ * failing the whole sync.
  */
 export async function fetchAllHubs(): Promise<BrabbleEvent[]> {
-  const HUBS = ["hackathons", "workshops", "competitions"];
+  const HUBS = ["hackathons"];
   const results = await Promise.allSettled(HUBS.map(fetchAllEvents));
 
   const all: BrabbleEvent[] = [];
