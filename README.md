@@ -16,12 +16,46 @@ The AI understands **category**, **location**, **date range**, **student type**,
 
 ## 🛠 Technology Stack
 
-| Layer       | Technology                              |
-|-------------|-----------------------------------------|
-| Frontend    | Next.js 15, TypeScript, Tailwind CSS    |
-| Backend     | Node.js, Express.js, TypeScript         |
-| Database    | PostgreSQL + Prisma ORM *(Phase 2+)*    |
-| AI          | To be integrated in a later phase       |
+| Layer       | Technology                                                        |
+|-------------|-------------------------------------------------------------------|
+| Frontend    | Next.js 16, React 19, TypeScript, Tailwind CSS                    |
+| Backend     | Node.js, Express.js, TypeScript                                   |
+| Database    | PostgreSQL + Prisma ORM                                           |
+| AI / DL     | Gemini (query understanding) + local transformer models via transformers.js (ONNX Runtime) |
+
+---
+
+## 🧠 Deep Learning Search Pipeline
+
+Search runs in stages, and every deep learning model runs **locally inside the backend** (no API key, no per-query cost):
+
+```
+"coding contests for AI beginners"
+        ↓
+1. Query understanding — Gemini → structured intent (category, city, dates…)
+   (rule-based fallback if Gemini is unavailable)
+        ↓
+2. Hybrid retrieval
+   • Keyword search   — Postgres text match on intent terms
+   • Semantic search  — all-MiniLM-L6-v2 bi-encoder (Sentence-BERT, 384-d),
+                        cosine similarity vs precomputed opportunity embeddings
+   → union, scored 60% semantic + 40% keyword
+        ↓
+3. Re-ranking — ms-marco-MiniLM-L-6-v2 cross-encoder reads query + opportunity
+   together; blended 50/50 with the stage-2 score
+        ↓
+4. Personalization — 70% search score + 30% student-profile match (logged-in users)
+```
+
+| Technique | Model | Where |
+|-----------|-------|-------|
+| Sentence embeddings (contrastive-trained transformer) | `Xenova/all-MiniLM-L6-v2` | `backend/src/services/embeddingService.ts` |
+| Cross-encoder re-ranking (cross-attention relevance) | `Xenova/ms-marco-MiniLM-L-6-v2` | `backend/src/services/rerankerService.ts` |
+| Hybrid retrieval + score fusion | — | `backend/src/services/aiSearchService.ts` |
+
+- Model weights (~100 MB total) download once on first run into `backend/.model-cache/` (gitignored).
+- Opportunity embeddings are stored in `Opportunity.embedding` and kept up to date automatically on server start, after a Brabble sync, and after admin edits. `npm run db:embed` runs a manual backfill.
+- If a model can't load, search degrades gracefully (keyword-only / first-stage ranking) instead of failing.
 
 ---
 
@@ -31,7 +65,7 @@ The AI understands **category**, **location**, **date range**, **student type**,
 Hack-Guru/
 ├── frontend/          # Next.js App Router frontend
 │   ├── app/           # Pages and layouts
-│   ├── components/    # Reusable UI components (Phase 2+)
+│   ├── components/    # Reusable UI components
 │   ├── lib/           # API clients and utilities
 │   ├── types/         # Shared TypeScript types
 │   └── public/        # Static assets
@@ -40,10 +74,11 @@ Hack-Guru/
     ├── src/
     │   ├── controllers/   # Route handler functions
     │   ├── routes/        # Express route definitions
-    │   ├── services/      # Business logic (Phase 2+)
-    │   ├── middleware/     # Custom middleware
+    │   ├── services/      # Business logic, AI search, embeddings, reranker
+    │   ├── middleware/    # Custom middleware
     │   └── types/         # Shared TypeScript types
-    └── prisma/            # Prisma schema (Phase 2+)
+    ├── prisma/            # Prisma schema, migrations, seed
+    └── scripts/           # Admin, data, and embedding scripts
 ```
 
 ---
@@ -54,87 +89,61 @@ Hack-Guru/
 
 - Node.js ≥ 18
 - npm ≥ 9
+- PostgreSQL 14+
 
 ### 1. Clone and navigate
 
 ```bash
-git clone <repo-url>
-cd Hack-Guru
+git clone https://github.com/jainulavudeen/AI-Search-Engine-and-Discover-Assistant.git
+cd AI-Search-Engine-and-Discover-Assistant
 ```
 
-### 2. Install frontend dependencies
+### 2. Create the database
 
 ```bash
-cd frontend
-npm install
+brew install postgresql@14        # macOS; use your OS package manager otherwise
+brew services start postgresql@14
+createdb hack_guru_db
 ```
 
-### 3. Install backend dependencies
+### 3. Backend setup
 
 ```bash
-cd ../backend
+cd backend
 npm install
+cp .env.example .env              # fill in DATABASE_URL, JWT_SECRET, GEMINI_API_KEY
+npx prisma migrate deploy         # create tables
+npm run db:seed                   # sample opportunities
+npm run db:embed                  # build embeddings (downloads models once)
+```
+
+### 4. Frontend setup
+
+```bash
+cd ../frontend
+npm install
+cp .env.example .env.local        # NEXT_PUBLIC_API_URL=http://localhost:4000
 ```
 
 ---
 
 ## 🚀 Running the Application
 
-### Start the Backend
+Open two terminals:
 
 ```bash
+# Terminal 1 — backend on http://localhost:4000
 cd backend
-cp .env.example .env   # already done if you cloned the repo
 npm run dev
 ```
 
-The backend will start at **http://localhost:4000**
-
-Health check: `GET http://localhost:4000/api/health`
-
-### Start the Frontend
-
-Open a **new terminal tab**:
-
 ```bash
+# Terminal 2 — frontend on http://localhost:3000
 cd frontend
 npm run dev
 ```
 
-The frontend will start at **http://localhost:3000**
-
----
-
-## 🏥 API Endpoints (Phase 1)
-
-| Method | Path          | Description              |
-|--------|---------------|--------------------------|
-| GET    | `/api/health` | Returns backend status   |
-
-Example response:
-```json
-{
-  "status": "ok",
-  "service": "AI Smart Search Backend",
-  "version": "1.0.0",
-  "environment": "development"
-}
-```
-
----
-
-## 🗄️ PostgreSQL — Future Integration
-
-In **Phase 2**, PostgreSQL will be connected via Prisma ORM.
-
-Steps that will be performed:
-1. Install Prisma: `npm install @prisma/client prisma`
-2. Set `DATABASE_URL` in `backend/.env`
-3. Define models in `backend/prisma/schema.prisma`
-4. Run `npx prisma migrate dev` to apply migrations
-5. Use `PrismaClient` in service layer
-
-The `backend/prisma/schema.prisma` file currently contains a commented-out template ready for activation.
+Then open **http://localhost:3000**. Health check: `GET http://localhost:4000/api/health`
 
 ---
 
@@ -142,29 +151,24 @@ The `backend/prisma/schema.prisma` file currently contains a commented-out templ
 
 ### Backend (`backend/.env`)
 
-| Variable       | Description                        | Default                   |
-|----------------|------------------------------------|---------------------------|
-| `PORT`         | Port the Express server listens on | `4000`                    |
-| `NODE_ENV`     | Environment mode                   | `development`             |
-| `FRONTEND_URL` | Allowed CORS origin                | `http://localhost:3000`   |
-| `DATABASE_URL` | PostgreSQL connection string        | *(Phase 2)*               |
+| Variable            | Description                                   | Default                   |
+|---------------------|-----------------------------------------------|---------------------------|
+| `PORT`              | Port the Express server listens on            | `4000`                    |
+| `NODE_ENV`          | Environment mode                              | `development`             |
+| `FRONTEND_URL`      | Allowed CORS origin                           | `http://localhost:3000`   |
+| `DATABASE_URL`      | PostgreSQL connection string                  | —                         |
+| `JWT_SECRET`        | Secret for signing auth tokens                | —                         |
+| `GEMINI_API_KEY`    | Gemini key for query understanding (optional) | —                         |
+| `GEMINI_MODEL`      | Gemini model name (optional)                  | `gemini-3.5-flash-lite`   |
+| `BRABBLE_API_KEY`   | External event data (optional)                | —                         |
+| `ADMIN_SYNC_SECRET` | Protects the admin sync endpoint              | —                         |
 
 ### Frontend (`frontend/.env.local`)
 
-| Variable               | Description              | Default                   |
-|------------------------|--------------------------|---------------------------|
-| `NEXT_PUBLIC_API_URL`  | Backend API base URL     | `http://localhost:4000`   |
-
----
-
-## 🗺️ Roadmap
-
-- [x] Phase 1 — Foundation & Backend Connection
-- [ ] Phase 2 — Database Schema & Seed Data
-- [ ] Phase 3 — Search UI & Filters
-- [ ] Phase 4 — AI Query Understanding
-- [ ] Phase 5 — Authentication & User Profiles
-- [ ] Phase 6 — Production Deployment
+| Variable               | Description                          | Default                   |
+|------------------------|--------------------------------------|---------------------------|
+| `NEXT_PUBLIC_API_URL`  | Backend API base URL                 | `http://localhost:4000`   |
+| `ADMIN_SYNC_SECRET`    | Same as backend, server-side only    | —                         |
 
 ---
 
