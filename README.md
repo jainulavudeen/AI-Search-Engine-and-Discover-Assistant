@@ -47,11 +47,31 @@ Search runs in stages, and every deep learning model runs **locally inside the b
 4. Personalization — 70% search score + 30% student-profile match (logged-in users)
 ```
 
+### Neural recommendations ("AI Match")
+
+Each student is represented as a **profile vector** in the same embedding space as the opportunities, so the fit between a student and an opportunity is a cosine similarity:
+
+```
+profile vector = weighted average of
+   embed("Interested in AI, ML. Looking for hackathons. Studying CS, year 3")  × 1.0
+   + vectors of bookmarked / registered opportunities                          × 3.0
+   + vectors of recommendation clicks                                          × 2.0
+   + vectors of viewed opportunities                                           × 1.0
+   + embeddings of the last 5 search queries                                   × 0.5
+   (activity decays with a 30-day half-life; each opportunity counts once)
+
+AI Match = 60% transparent rule score (interest, category, eligibility, location, …)
+         + 40% neural similarity
+```
+
+This is content-based, so it works from a student's first onboarding answers with no cold-start problem. The rules keep hard preferences such as city and category, which embeddings barely encode. The opportunity page shows the similarity alongside the rule breakdown. A trained two-tower model becomes worthwhile once there is enough interaction data.
+
 | Technique | Model | Where |
 |-----------|-------|-------|
 | Sentence embeddings (contrastive-trained transformer) | `Xenova/all-MiniLM-L6-v2` | `backend/src/services/embeddingService.ts` |
 | Cross-encoder re-ranking (cross-attention relevance) | `Xenova/ms-marco-MiniLM-L-6-v2` | `backend/src/services/rerankerService.ts` |
 | Hybrid retrieval + score fusion | — | `backend/src/services/aiSearchService.ts` |
+| User profile embeddings (neural recommendations) | `Xenova/all-MiniLM-L6-v2` | `backend/src/services/userEmbeddingService.ts` |
 
 - Model weights (~100 MB total) download once on first run into `backend/.model-cache/` (gitignored).
 - Opportunity embeddings are stored in `Opportunity.embedding` and kept up to date automatically on server start, after a Brabble sync, and after admin edits. `npm run db:embed` runs a manual backfill.

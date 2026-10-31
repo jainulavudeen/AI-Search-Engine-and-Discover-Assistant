@@ -10,6 +10,12 @@ import { warmUpReranker } from "./services/rerankerService";
 const app = express();
 const PORT = parseInt(process.env.PORT ?? "4000", 10);
 
+// Opportunity rows carry a 384-float embedding (+ its hash) for server-side
+// ranking only — never ship them to clients.
+app.set("json replacer", (key: string, value: unknown) =>
+  key === "embedding" || key === "embeddingHash" ? undefined : value
+);
+
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
 app.use(

@@ -1,12 +1,21 @@
 /**
- * Recommendation Service — Transparent Scoring Algorithm
+ * Recommendation Service — Hybrid Rule-Based + Neural Scoring
  *
- * This is a rule-based matching system. The UI labels it "AI Match" to indicate
- * that AI features are used elsewhere on the platform (e.g. natural-language
- * search). The score itself is NOT produced by a machine-learning model and
- * should be treated as a helpful guide, not a scientific prediction.
+ * The "AI Match" score blends two signals:
  *
- * ── Scoring weights (total = 100 points) ──────────────────────────────────────
+ *   final = 60% rule score (transparent factors below, 0–100)
+ *         + 40% neural similarity (0–100)
+ *
+ * The neural part is the cosine similarity between the student's profile
+ * vector (userEmbeddingService: onboarding answers + bookmarks + views +
+ * searches, recency-weighted) and the opportunity's embedding, both from the
+ * same transformer model used by semantic search. It catches matches the
+ * keyword rules miss (e.g. "Mobile Development" ⇔ a Flutter workshop). The
+ * rules keep hard preferences — category, city, eligibility — that embeddings
+ * barely encode. If the model or an opportunity's vector is unavailable, the
+ * score falls back to the rule score alone.
+ *
+ * ── Rule scoring weights (total = 100 points) ─────────────────────────────────
  *
  * ┌───────────────────┬────────┬────────────────────────────────────────────────┐
  * │ Factor            │ Weight │ Logic                                          │
@@ -43,6 +52,8 @@
 
 import prisma from "../lib/prisma";
 import { Opportunity, User } from "@prisma/client";
+import { cosineSimilarity, EMBEDDING_DIM } from "./embeddingService";
+import { buildUserVector, UserVector } from "./userEmbeddingService";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // WEIGHTS (must sum to 100)
@@ -67,6 +78,41 @@ const BOOSTERS = {
   /** +3 if the user has repeatedly viewed opportunities in the same domain (Phase 16) */
   viewedDomain: 3,
 } as const;
+
+// Neural blend. Similarities are mapped onto 0–100 with a FIXED scale (not
+// per-user min-max) so an opportunity's score is identical on the list page
+// and its detail page. Calibrated on real profiles: unrelated ≈ 0.25–0.35,
+// strong matches ≈ 0.6–0.8 (profile-only users top out lower, ≈ 0.65–0.7).
+const NEURAL_WEIGHT = 0.4;
+const NEURAL_SIM_FLOOR = 0.25;
+const NEURAL_SIM_CEIL = 0.8;
+/** Neural score at/above which "Profile similarity" is shown as a reason. */
+const NEURAL_REASON_THRESHOLD = 60;
+
+/** 0–100 neural score, or null when either vector is missing. */
+function neuralScore(userVec: UserVector | null, opp: Opportunity): number | null {
+  if (!userVec || opp.embedding.length !== EMBEDDING_DIM) return null;
+  const sim = cosineSimilarity(userVec.vector, opp.embedding);
+  const scaled = (sim - NEURAL_SIM_FLOOR) / (NEURAL_SIM_CEIL - NEURAL_SIM_FLOOR);
+  return Math.round(Math.min(Math.max(scaled, 0), 1) * 100);
+}
+
+function blendNeural(ruleScore: number, neural: number | null): number {
+  const blended = neural === null ? ruleScore : ruleScore * (1 - NEURAL_WEIGHT) + neural * NEURAL_WEIGHT;
+  return Math.min(Math.max(Math.round(blended), 0), 100);
+}
+
+function similarityFactor(neural: number, userVec: UserVector): MatchedFactor {
+  return {
+    factor: "similarity",
+    label: "Profile similarity",
+    detail: userVec.hasActivity
+      ? "Its content closely resembles your interests and the opportunities you've saved, viewed or searched for."
+      : "Its content closely resembles the interests in your profile.",
+    points: Math.round(neural * NEURAL_WEIGHT),
+    maxPoints: Math.round(100 * NEURAL_WEIGHT),
+  };
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // LOCATION ALIAS NORMALIZATION
@@ -195,11 +241,14 @@ export interface ScoreBreakdown {
   skill:       number;  // 0–10
   mode:        number;  // 0–5
   deadline:    number;  // 0–5
-  total:       number;  // 0–100
+  /** 0–100 neural profile similarity; null when unavailable */
+  similarity:  number | null;
+  /** 60% rule factors (+ boosters) + 40% similarity, 0–100 */
+  total:       number;
 }
 
 export interface MatchedFactor {
-  factor: "interest" | "category" | "location" | "eligibility" | "skill" | "mode" | "deadline" | "engagement";
+  factor: "interest" | "category" | "location" | "eligibility" | "skill" | "mode" | "deadline" | "engagement" | "similarity";
   label: string;
   detail: string;
   points: number;
@@ -235,7 +284,12 @@ interface EngagementContext {
 // CORE SCORING FUNCTION
 // ══════════════════════════════════════════════════════════════════════════════
 
-function scoreOpportunity(user: User, opp: Opportunity, ctx: EngagementContext): RecommendationResult {
+function scoreOpportunity(
+  user: User,
+  opp: Opportunity,
+  ctx: EngagementContext,
+  userVec: UserVector | null
+): RecommendationResult {
   const txt = [opp.title, opp.description, opp.eligibility, ...opp.tags, ...opp.skills]
     .join(" ")
     .toLowerCase();
@@ -520,7 +574,15 @@ function scoreOpportunity(user: User, opp: Opportunity, ctx: EngagementContext):
     });
   }
 
-  const total = Math.min(Math.max(Math.round(baseScore + boostTotal), 0), 100);
+  const ruleScore = Math.min(Math.max(Math.round(baseScore + boostTotal), 0), 100);
+
+  // ── Neural profile similarity ─────────────────────────────────────────────
+
+  const neural = neuralScore(userVec, opp);
+  if (neural !== null && neural >= NEURAL_REASON_THRESHOLD) {
+    matchedFactors.push(similarityFactor(neural, userVec!));
+  }
+  const total = blendNeural(ruleScore, neural);
 
   const breakdown: ScoreBreakdown = {
     interest:    interestScore,
@@ -530,6 +592,7 @@ function scoreOpportunity(user: User, opp: Opportunity, ctx: EngagementContext):
     skill:       skillScore,
     mode:        modeScore,
     deadline:    dlScore,
+    similarity:  neural,
     total,
   };
 
@@ -584,6 +647,8 @@ function generateReason(
           return null; // deadline urgency shown separately in UI
         case "engagement":
           return "it's similar to opportunities you've engaged with recently";
+        case "similarity":
+          return "its content closely matches your interests";
         default:
           return null;
       }
@@ -599,15 +664,23 @@ function generateReason(
 // DEFAULT SCORING (no onboarding data)
 // ══════════════════════════════════════════════════════════════════════════════
 
-function scoreDefault(opp: Opportunity): RecommendationResult {
+// Without onboarding answers the user vector (if any) comes purely from
+// activity — bookmarks, views and searches — so it can still personalise.
+function scoreDefault(opp: Opportunity, userVec: UserVector | null): RecommendationResult {
   const dlScore = deadlineScore(opp.registrationDeadline);
   const base = Math.min(opp.relevanceScore + (opp.featured ? 5 : 0), 72);
-  const total = Math.min(Math.max(base + dlScore, 0), 100);
+  const popularity = Math.min(Math.max(base + dlScore, 0), 100);
+
+  const neural = neuralScore(userVec, opp);
+  const total = blendNeural(popularity, neural);
+  const similar = neural !== null && neural >= NEURAL_REASON_THRESHOLD;
 
   return {
     opportunity: opp,
     score: total,
-    reason: opp.featured
+    reason: similar
+      ? "Similar to opportunities you've engaged with recently."
+      : opp.featured
       ? "Featured opportunity — highly rated by the community."
       : "Popular opportunity for students.",
     breakdown: {
@@ -618,9 +691,10 @@ function scoreDefault(opp: Opportunity): RecommendationResult {
       skill:       Math.round(total * 0.2),
       mode:        0,
       deadline:    dlScore,
+      similarity:  neural,
       total,
     },
-    matchedFactors: [],
+    matchedFactors: similar ? [similarityFactor(neural!, userVec!)] : [],
   };
 }
 
@@ -682,6 +756,27 @@ async function loadEngagementContext(userId: string): Promise<EngagementContext>
   };
 }
 
+function hasOnboardingProfile(user: User): boolean {
+  return (
+    user.interests.length > 0 ||
+    user.preferredLocations.length > 0 ||
+    user.opportunityTypes.length > 0
+  );
+}
+
+/** Everything needed to score opportunities for one user, loaded once per request. */
+async function loadScoringContext(userId: string) {
+  const [user, ctx] = await Promise.all([
+    prisma.user.findUnique({ where: { id: userId } }),
+    loadEngagementContext(userId),
+  ]);
+  if (!user) return null;
+  const userVec = await buildUserVector(user);
+  const score = (opp: Opportunity) =>
+    hasOnboardingProfile(user) ? scoreOpportunity(user, opp, ctx, userVec) : scoreDefault(opp, userVec);
+  return { user, userVec, score };
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // PUBLIC API
 // ══════════════════════════════════════════════════════════════════════════════
@@ -724,23 +819,10 @@ export async function rankOpportunitiesForUser(
   userId: string,
   opportunities: Opportunity[]
 ): Promise<RecommendationResult[]> {
-  const [user, ctx] = await Promise.all([
-    prisma.user.findUnique({ where: { id: userId } }),
-    loadEngagementContext(userId),
-  ]);
+  const scoring = await loadScoringContext(userId);
+  if (!scoring) return [];
 
-  if (!user) return [];
-
-  const hasProfile =
-    user.interests.length > 0 ||
-    user.preferredLocations.length > 0 ||
-    user.opportunityTypes.length > 0;
-
-  const scored = hasProfile
-    ? opportunities.map((opp) => scoreOpportunity(user, opp, ctx))
-    : opportunities.map((opp) => scoreDefault(opp));
-
-  return scored.sort((a, b) => b.score - a.score);
+  return opportunities.map(scoring.score).sort((a, b) => b.score - a.score);
 }
 
 /**
@@ -754,22 +836,13 @@ export async function getOpportunityMatch(
   userId: string,
   opportunityId: string
 ): Promise<RecommendationResult | null> {
-  const [user, opp, ctx] = await Promise.all([
-    prisma.user.findUnique({ where: { id: userId } }),
+  const [scoring, opp] = await Promise.all([
+    loadScoringContext(userId),
     prisma.opportunity.findUnique({ where: { id: opportunityId } }),
-    loadEngagementContext(userId),
   ]);
 
-  if (!user || !opp) return null;
-
-  const hasProfile =
-    user.interests.length > 0 ||
-    user.preferredLocations.length > 0 ||
-    user.opportunityTypes.length > 0;
-
-  return hasProfile
-    ? scoreOpportunity(user, opp, ctx)
-    : scoreDefault(opp);
+  if (!scoring || !opp) return null;
+  return scoring.score(opp);
 }
 
 /**
@@ -791,13 +864,9 @@ export async function personalizeSearchResults(
 ): Promise<Array<{ opportunity: Opportunity; blendedScore: number; reason: string }>> {
   if (opportunities.length === 0) return [];
 
-  const now = new Date();
-  const [user, ctx] = await Promise.all([
-    prisma.user.findUnique({ where: { id: userId } }),
-    loadEngagementContext(userId),
-  ]);
+  const scoring = await loadScoringContext(userId);
 
-  if (!user) {
+  if (!scoring) {
     return opportunities.map((opp) => ({
       opportunity: opp,
       blendedScore: Math.min(Math.max(searchScores[opp.id] ?? opp.relevanceScore, 0), 100),
@@ -805,20 +874,18 @@ export async function personalizeSearchResults(
     }));
   }
 
-  const hasProfile =
-    user.interests.length > 0 ||
-    user.preferredLocations.length > 0 ||
-    user.opportunityTypes.length > 0;
+  // Nothing to personalise from: no onboarding answers and no activity vector
+  const canPersonalize = hasOnboardingProfile(scoring.user) || scoring.userVec !== null;
 
   return opportunities
     .map((opp) => {
       const searchScore = Math.min(Math.max(searchScores[opp.id] ?? opp.relevanceScore, 0), 100);
 
-      if (!hasProfile) {
+      if (!canPersonalize) {
         return { opportunity: opp, blendedScore: searchScore, reason: "Top result for your search." };
       }
 
-      const match = scoreOpportunity(user, opp, ctx);
+      const match = scoring.score(opp);
       // 70% search relevance + 30% profile match
       const blended = Math.min(Math.max(Math.round(searchScore * 0.7 + match.score * 0.3), 0), 100);
 

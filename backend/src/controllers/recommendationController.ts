@@ -29,12 +29,13 @@ export const listRecommendations = async (
         })),
         total: recommendations.length,
         meta: {
-          scoringVersion: "v2",
+          scoringVersion: "v3",
           weights: {
             interest: 25, category: 20, eligibility: 20,
             location: 15, skill: 10, mode: 5, deadline: 5,
           },
-          note: "AI Match is based on your interests, eligibility, location, skills and opportunity preferences. Scores are indicative, not scientifically validated.",
+          blend: { rules: 0.6, neuralSimilarity: 0.4 },
+          note: "AI Match blends transparent rules (interests, eligibility, location, skills, preferences) with neural similarity between your profile and each opportunity. Scores are indicative, not scientifically validated.",
         },
       },
     });
@@ -118,6 +119,7 @@ function serializeBreakdown(breakdown: any) {
     skill:       breakdown.skill       ?? 0,
     mode:        breakdown.mode        ?? 0,
     deadline:    breakdown.deadline    ?? 0,
+    similarity:  breakdown.similarity  ?? null,
     total:       breakdown.total       ?? 0,
   };
 }

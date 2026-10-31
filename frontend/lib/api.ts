@@ -226,7 +226,7 @@ export async function aiSearch(
 // ── Recommendations ───────────────────────────────────────────────────────────
 
 export interface MatchedFactor {
-  factor: "interest" | "category" | "location" | "eligibility" | "skill" | "mode" | "deadline" | "engagement";
+  factor: "interest" | "category" | "location" | "eligibility" | "skill" | "mode" | "deadline" | "engagement" | "similarity";
   label: string;
   detail: string;
   points: number;
@@ -241,6 +241,8 @@ export interface ScoreBreakdown {
   skill: number;
   mode: number;
   deadline: number;
+  /** 0–100 neural profile similarity; null when unavailable */
+  similarity: number | null;
   total: number;
 }
 
