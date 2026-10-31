@@ -13,6 +13,7 @@
     "db:seed": "ts-node-dev --transpile-only prisma/seed.ts",
     "db:embed": "ts-node-dev --transpile-only --exit-child scripts/embed_opportunities.ts",
     "db:refresh-dates": "ts-node-dev --transpile-only --exit-child scripts/refresh_demo_dates.ts",
+    "eval:search": "ts-node-dev --transpile-only --exit-child scripts/eval_search.ts",
     "db:studio": "prisma studio",
     "db:reset": "prisma migrate reset --force"
   },

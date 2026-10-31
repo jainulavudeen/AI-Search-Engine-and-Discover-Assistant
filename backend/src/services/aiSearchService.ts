@@ -544,7 +544,8 @@ interface RetrievalResult {
 async function executeSearch(
   query: string,
   intent: SearchIntent,
-  explicitFilters?: StructuredFilters
+  explicitFilters: StructuredFilters | undefined,
+  useSemantic: boolean
 ): Promise<RetrievalResult> {
   const { filterWhere, keywordWhere } = buildSearchWhere(intent, explicitFilters);
 
@@ -554,11 +555,13 @@ async function executeSearch(
       orderBy: { relevanceScore: "desc" },
       take: RESULT_LIMIT,
     }),
-    semanticSearch(query, filterWhere).catch((err) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[AISearch] ⚡ Semantic search unavailable (${msg}), using keyword-only retrieval`);
-      return null;
-    }),
+    useSemantic
+      ? semanticSearch(query, filterWhere).catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[AISearch] ⚡ Semantic search unavailable (${msg}), using keyword-only retrieval`);
+          return null;
+        })
+      : null,
   ]);
 
   if (!semanticHits) return { rows: keywordRows, similarity: null };
@@ -754,16 +757,31 @@ function generateExplanation(intent: SearchIntent, count: number): string {
 // MAIN EXPORTED FUNCTION
 // ══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Pipeline stage switches — all on in production. Turned off individually by
+ * the offline evaluation (scripts/eval_search.ts) to measure each stage.
+ */
+export interface SearchPipelineOptions {
+  /** Gemini intent extraction (false = rule-based only, deterministic) */
+  llmIntent?: boolean;
+  /** Embedding retrieval + hybrid scoring (false = keyword-only) */
+  semantic?: boolean;
+  /** Cross-encoder second stage */
+  rerank?: boolean;
+}
+
 export async function aiSearch(
   query: string,
   userId?: string | null,
-  explicitFilters?: StructuredFilters
+  explicitFilters?: StructuredFilters,
+  { llmIntent = true, semantic = true, rerank = true }: SearchPipelineOptions = {}
 ): Promise<SearchResponse> {
   let intent: SearchIntent;
   let source: "ai" | "fallback" = "ai";
 
   // 1. Try Gemini (1 call per search — never called per-opportunity)
   try {
+    if (!llmIntent) throw new Error("disabled by pipeline options");
     intent = await extractWithGemini(query);
     console.log("[AISearch] ✅ Gemini extracted intent:", JSON.stringify(intent));
   } catch (err) {
@@ -790,7 +808,7 @@ export async function aiSearch(
 
   // 3. Execute safe Prisma queries (expired opportunities already excluded).
   // Explicit user-selected filters take priority over the LLM's guess.
-  const { rows: retrieved, similarity } = await executeSearch(query, intent, explicitFilters);
+  const { rows: retrieved, similarity } = await executeSearch(query, intent, explicitFilters, semantic);
 
   // Effective intent — LLM guess with explicit filter overrides applied.
   // Used for the response's `intent` (search-page chips) and explanation,
@@ -808,8 +826,10 @@ export async function aiSearch(
   let baseRanked = hybridRanked;
   let reranked = false;
   try {
-    baseRanked = await rerankResults(query, hybridRanked);
-    reranked = true;
+    if (rerank) {
+      baseRanked = await rerankResults(query, hybridRanked);
+      reranked = true;
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[AISearch] ⚡ Reranker unavailable (${msg}), using first-stage ranking`);
