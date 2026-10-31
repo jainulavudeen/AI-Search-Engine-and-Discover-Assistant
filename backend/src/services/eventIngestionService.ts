@@ -16,6 +16,7 @@
 import { Category, Mode, Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { fetchAllHubs, type BrabbleEvent } from "./eventApiClient";
+import { scheduleEmbeddingSync } from "./embeddingService";
 
 // ── Result types ──────────────────────────────────────────────────────────────
 
@@ -358,6 +359,9 @@ export async function runIngestion(): Promise<IngestionSummary> {
   }
 
   console.log(`[ingestion] Done — created: ${summary.created}, updated: ${summary.updated}, skipped: ${summary.skipped}, errors: ${summary.errors}`);
+
+  // 3. Embed new/changed opportunities for semantic search (background, non-fatal)
+  scheduleEmbeddingSync();
 
   return summary;
 }

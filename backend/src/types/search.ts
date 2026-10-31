@@ -65,4 +65,8 @@ export interface SearchResponse {
   source: "ai" | "fallback";
   /** true when results were re-ranked using the logged-in student's profile */
   personalized: boolean;
+  /** true when the local transformer embedding model contributed to ranking */
+  semantic: boolean;
+  /** true when the local cross-encoder re-scored the results */
+  reranked: boolean;
 }

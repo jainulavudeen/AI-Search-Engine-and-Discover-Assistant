@@ -98,6 +98,14 @@ model Opportunity {
   sourceId             String?
   externalUpdatedAt    DateTime?
 
+  // ── Semantic search (transformer sentence embedding) ────────────────────────
+  // embedding: L2-normalised 384-d vector from all-MiniLM-L6-v2, computed
+  //   locally from title/description/skills/tags (see embeddingService).
+  // embeddingHash: hash of the exact text + model the vector was built from,
+  //   so syncEmbeddings() re-embeds only rows whose content changed.
+  embedding            Float[]   @default([])
+  embeddingHash        String?
+
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
 

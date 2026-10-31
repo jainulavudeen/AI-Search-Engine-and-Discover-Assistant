@@ -5,7 +5,12 @@
  * 1. Try Gemini Flash to extract structured SearchIntent from natural language
  * 2. Fallback to rule-based extraction if no API key or Gemini fails
  * 3. Backend converts SearchIntent → safe Prisma queries (AI never touches SQL)
- * 4. Results are ranked; if userId is provided, personalization is blended in
+ * 4. Hybrid retrieval: keyword matches ∪ semantic matches from a local
+ *    transformer embedding model (see embeddingService), scored as a
+ *    weighted blend of semantic similarity and keyword relevance
+ * 5. Second stage: a local cross-encoder re-scores the shortlist by reading
+ *    query + opportunity together (see rerankerService)
+ * 6. Results are ranked; if userId is provided, personalization is blended in
  *
  * LLM is used ONLY for:
  *   a) Natural-language → structured SearchIntent extraction (1 call per search)
@@ -26,6 +31,8 @@ import type {
 } from "../types/search";
 import { Prisma } from "@prisma/client";
 import { personalizeSearchResults } from "./recommendationService";
+import { semanticSearch } from "./embeddingService";
+import { rerankPassage, rerankScores } from "./rerankerService";
 import {
   buildOpportunityWhere,
   parseCategoryEnum,
@@ -252,18 +259,30 @@ Rules:
 - deadlinePreference: "urgent" if user wants soon deadlines, null otherwise
 - NEVER include SQL, code, or extra text — JSON only`;
 
+/**
+ * Overridable via env because Google retires pinned model versions (e.g.
+ * gemini-1.5-flash now 404s) — swapping models should be config, not code.
+ */
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
+
+/** A slow Gemini response falls back to rule-based extraction instead of stalling search */
+const GEMINI_TIMEOUT_MS = 5000;
+
 async function extractWithGemini(query: string): Promise<SearchIntent> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({
-    model: "gemini-1.5-flash",
-    generationConfig: {
-      temperature: 0.1, // low temperature for deterministic JSON
-      maxOutputTokens: 512,
+  const model = genAI.getGenerativeModel(
+    {
+      model: GEMINI_MODEL,
+      generationConfig: {
+        temperature: 0.1, // low temperature for deterministic JSON
+        maxOutputTokens: 512,
+      },
     },
-  });
+    { timeout: GEMINI_TIMEOUT_MS }
+  );
 
   const prompt = `${SYSTEM_PROMPT}\n\nQuery: "${query}"`;
   const result = await model.generateContent(prompt);
@@ -389,7 +408,7 @@ function mergeIntentWithFilters(
  * built once via the shared buildOpportunityWhere() so this never drifts
  * from plain browse (/api/opportunities) filtering.
  */
-async function executeSearch(intent: SearchIntent, explicitFilters?: StructuredFilters) {
+function buildSearchWhere(intent: SearchIntent, explicitFilters?: StructuredFilters) {
   const now = new Date();
   const AND: Prisma.OpportunityWhereInput[] = [];
 
@@ -476,30 +495,111 @@ async function executeSearch(intent: SearchIntent, explicitFilters?: StructuredF
     );
   }
 
-  const where: Prisma.OpportunityWhereInput =
-    AND.length > 0 || textConditions.length > 0
-      ? {
-          AND: [
-            ...AND,
-            ...(textConditions.length > 0 ? [{ OR: textConditions }] : []),
-          ],
-        }
-      : { AND };
+  return {
+    /** Hard filters only — the candidate pool for semantic retrieval */
+    filterWhere: { AND } satisfies Prisma.OpportunityWhereInput,
+    /** Hard filters + keyword OR — the classic keyword retrieval query */
+    keywordWhere: {
+      AND: [...AND, ...(textConditions.length > 0 ? [{ OR: textConditions }] : [])],
+    } satisfies Prisma.OpportunityWhereInput,
+  };
+}
 
-  return prisma.opportunity.findMany({
-    where,
-    orderBy: { relevanceScore: "desc" },
-    take: 50, // increased from 30 to allow personalization to re-rank a larger pool
-  });
+// ══════════════════════════════════════════════════════════════════════════════
+// HYBRID RETRIEVAL (keyword ∪ semantic)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** Max results returned — leaves personalization a larger pool to re-rank */
+const RESULT_LIMIT = 50;
+
+/**
+ * A semantic-only match (one the keyword query missed) is included when its
+ * cosine similarity is ≥ SEMANTIC_MIN_SIMILARITY (MiniLM scores unrelated
+ * text ~0.0–0.2) AND within SEMANTIC_RELATIVE_MARGIN of the best match — so a
+ * query with strong matches doesn't get padded with loosely related ones.
+ */
+const SEMANTIC_MIN_SIMILARITY = 0.3;
+const SEMANTIC_RELATIVE_MARGIN = 0.15;
+
+/** Cosine similarity at or above which the semantic component scores 100 */
+const SEMANTIC_FULL_SCORE_AT = 0.6;
+
+/** Weight of semantic similarity vs keyword relevance in the hybrid score */
+const SEMANTIC_WEIGHT = 0.6;
+
+type OpportunityRow = Awaited<ReturnType<typeof prisma.opportunity.findMany>>[number];
+
+interface RetrievalResult {
+  rows: OpportunityRow[];
+  /** opportunityId → cosine similarity; null when the embedding model is unavailable */
+  similarity: Map<string, number> | null;
+}
+
+/**
+ * Runs keyword retrieval and semantic retrieval over the same hard filters,
+ * then unions them. Semantic retrieval surfaces opportunities that match the
+ * query's meaning without sharing its words; if the model can't load, search
+ * degrades to keyword-only rather than failing.
+ */
+async function executeSearch(
+  query: string,
+  intent: SearchIntent,
+  explicitFilters?: StructuredFilters
+): Promise<RetrievalResult> {
+  const { filterWhere, keywordWhere } = buildSearchWhere(intent, explicitFilters);
+
+  const [keywordRows, semanticHits] = await Promise.all([
+    prisma.opportunity.findMany({
+      where: keywordWhere,
+      orderBy: { relevanceScore: "desc" },
+      take: RESULT_LIMIT,
+    }),
+    semanticSearch(query, filterWhere).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[AISearch] ⚡ Semantic search unavailable (${msg}), using keyword-only retrieval`);
+      return null;
+    }),
+  ]);
+
+  if (!semanticHits) return { rows: keywordRows, similarity: null };
+
+  const similarity = new Map(semanticHits.map((h) => [h.id, h.similarity]));
+
+  const keywordIds = new Set(keywordRows.map((r) => r.id));
+  const cutoff = Math.max(
+    SEMANTIC_MIN_SIMILARITY,
+    (semanticHits[0]?.similarity ?? 0) - SEMANTIC_RELATIVE_MARGIN
+  );
+  const semanticOnlyIds = semanticHits
+    .filter((h) => h.similarity >= cutoff && !keywordIds.has(h.id))
+    .slice(0, RESULT_LIMIT)
+    .map((h) => h.id);
+
+  const semanticRows =
+    semanticOnlyIds.length > 0
+      ? await prisma.opportunity.findMany({ where: { id: { in: semanticOnlyIds } } })
+      : [];
+
+  console.log(
+    `[AISearch] 🧠 Hybrid retrieval: ${keywordRows.length} keyword + ${semanticRows.length} semantic-only`
+  );
+
+  return { rows: [...keywordRows, ...semanticRows], similarity };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // RESULT RANKING (client-facing boosting on top of DB order)
 // ══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Scores each result 0–100. Keyword score = DB relevance + term/location
+ * boosts. When semantic similarity is available the final score is a convex
+ * blend: SEMANTIC_WEIGHT × semantic + (1 − SEMANTIC_WEIGHT) × keyword.
+ */
 function rankResults(
-  results: Awaited<ReturnType<typeof executeSearch>>,
-  intent: SearchIntent
+  results: OpportunityRow[],
+  intent: SearchIntent,
+  similarity: Map<string, number> | null = null
 ): SearchResult[] {
   return results
     .map((r) => {
@@ -524,6 +624,16 @@ function rankResults(
       // Boost for featured
       if (r.featured) boost += 3;
 
+      const keywordScore = Math.min(r.relevanceScore + boost, 100);
+      const sim = similarity?.get(r.id);
+      const searchScore =
+        sim === undefined
+          ? keywordScore
+          : Math.round(
+              SEMANTIC_WEIGHT * Math.min(Math.max(sim / SEMANTIC_FULL_SCORE_AT, 0), 1) * 100 +
+                (1 - SEMANTIC_WEIGHT) * keywordScore
+            );
+
       return {
         id: r.id,
         title: r.title,
@@ -541,10 +651,55 @@ function rankResults(
         registrationUrl: r.registrationUrl,
         relevanceScore: r.relevanceScore,
         featured: r.featured,
-        _searchScore: Math.min(r.relevanceScore + boost, 100),
+        _searchScore: searchScore,
       } satisfies SearchResult;
     })
+    .sort((a, b) => b._searchScore - a._searchScore)
+    .slice(0, RESULT_LIMIT);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CROSS-ENCODER RERANKING (second stage)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** Weight of the cross-encoder vs the first-stage hybrid score */
+const RERANK_WEIGHT = 0.5;
+
+/**
+ * Logit → 0–100 calibration: 100 × sigmoid(logit / RERANK_LOGIT_SCALE).
+ * On this catalogue clear matches score +4…+9 (→ 88–99), partial matches
+ * 0…+2 (→ 50–73), non-matches −4…−10 (→ 1–12).
+ *
+ * Absolute (not per-query min-max) on purpose: when the cross-encoder judges
+ * every candidate irrelevant, their logits differ only by noise, and min-max
+ * would stretch that noise across 0–100 and let it override the first stage.
+ */
+const RERANK_LOGIT_SCALE = 2;
+
+/**
+ * Re-scores the hybrid-ranked shortlist with the cross-encoder and blends:
+ * RERANK_WEIGHT × rerank + (1 − RERANK_WEIGHT) × hybrid. Keeping part of the
+ * hybrid score preserves signals the cross-encoder doesn't see well (exact
+ * location boost, featured, DB relevance, skill synonyms like Flutter→mobile).
+ */
+async function rerankResults(query: string, ranked: SearchResult[]): Promise<SearchResult[]> {
+  if (ranked.length === 0) return ranked;
+
+  const started = Date.now();
+  const logits = await rerankScores(query, ranked.map(rerankPassage));
+
+  const reranked = ranked
+    .map((r, i) => {
+      const rerankPct = 100 / (1 + Math.exp(-logits[i] / RERANK_LOGIT_SCALE));
+      return {
+        ...r,
+        _searchScore: Math.round(RERANK_WEIGHT * rerankPct + (1 - RERANK_WEIGHT) * r._searchScore),
+      };
+    })
     .sort((a, b) => b._searchScore - a._searchScore);
+
+  console.log(`[AISearch] 🎯 Cross-encoder reranked ${ranked.length} results in ${Date.now() - started}ms`);
+  return reranked;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -635,7 +790,7 @@ export async function aiSearch(
 
   // 3. Execute safe Prisma queries (expired opportunities already excluded).
   // Explicit user-selected filters take priority over the LLM's guess.
-  const rawResults = await executeSearch(intent, explicitFilters);
+  const { rows: retrieved, similarity } = await executeSearch(query, intent, explicitFilters);
 
   // Effective intent — LLM guess with explicit filter overrides applied.
   // Used for the response's `intent` (search-page chips) and explanation,
@@ -647,10 +802,24 @@ export async function aiSearch(
   let results: SearchResult[];
   let personalized = false;
 
+  // Hybrid-ranked, trimmed to RESULT_LIMIT, then cross-encoder reranked.
+  // Reranker failure is non-fatal — keep the first-stage order.
+  const hybridRanked = rankResults(retrieved, effectiveIntent, similarity);
+  let baseRanked = hybridRanked;
+  let reranked = false;
+  try {
+    baseRanked = await rerankResults(query, hybridRanked);
+    reranked = true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[AISearch] ⚡ Reranker unavailable (${msg}), using first-stage ranking`);
+  }
+  const keptIds = new Set(baseRanked.map((r) => r.id));
+  const rawResults = retrieved.filter((r) => keptIds.has(r.id));
+
   if (userId && rawResults.length > 0) {
     try {
       // Build search score map for blending
-      const baseRanked = rankResults(rawResults, effectiveIntent);
       const searchScoreMap: Record<string, number> = {};
       for (const r of baseRanked) {
         searchScoreMap[r.id] = r._searchScore;
@@ -672,14 +841,23 @@ export async function aiSearch(
     } catch (err) {
       // Personalization failure is non-fatal — fall back to pure search ranking
       console.warn("[AISearch] Personalization failed, using search-only ranking:", err);
-      results = rankResults(rawResults, effectiveIntent);
+      results = baseRanked;
     }
   } else {
-    results = rankResults(rawResults, effectiveIntent);
+    results = baseRanked;
   }
 
   // 5. Generate explanation from the effective (post-override) intent
   const explanation = generateExplanation(effectiveIntent, results.length);
 
-  return { intent: effectiveIntent, results, explanation, totalCount: results.length, source, personalized };
+  return {
+    intent: effectiveIntent,
+    results,
+    explanation,
+    totalCount: results.length,
+    source,
+    personalized,
+    semantic: similarity !== null,
+    reranked,
+  };
 }

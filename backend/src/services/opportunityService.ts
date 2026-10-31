@@ -1,6 +1,7 @@
 import { Prisma, Category, Mode, Opportunity } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { INTEREST_EXPANSION, rankOpportunitiesForUser } from "./recommendationService";
+import { scheduleEmbeddingSync } from "./embeddingService";
 
 // ── Query param types ──────────────────────────────────────────────────────────
 
@@ -315,7 +316,9 @@ export async function getOpportunityById(id: string) {
 export async function createOpportunity(
   data: Prisma.OpportunityCreateInput
 ) {
-  return prisma.opportunity.create({ data });
+  const created = await prisma.opportunity.create({ data });
+  scheduleEmbeddingSync();
+  return created;
 }
 
 export async function logSearchInteraction(params: {
@@ -452,7 +455,9 @@ export interface AdminOpportunityUpdate {
 }
 
 export async function updateOpportunity(id: string, data: AdminOpportunityUpdate) {
-  return prisma.opportunity.update({ where: { id }, data });
+  const updated = await prisma.opportunity.update({ where: { id }, data });
+  scheduleEmbeddingSync();
+  return updated;
 }
 
 export async function setOpportunityStatus(id: string, isActive: boolean) {

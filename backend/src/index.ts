@@ -4,6 +4,8 @@ import cors from "cors";
 import apiRoutes from "./routes";
 import { requestLogger } from "./middleware/requestLogger";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
+import { scheduleEmbeddingSync } from "./services/embeddingService";
+import { warmUpReranker } from "./services/rerankerService";
 
 const app = express();
 const PORT = parseInt(process.env.PORT ?? "4000", 10);
@@ -39,6 +41,10 @@ app.listen(PORT, () => {
   console.log(`   Environment : ${process.env.NODE_ENV ?? "development"}`);
   console.log(`   Health      : http://localhost:${PORT}/api/health`);
   console.log(`   Opportunities: http://localhost:${PORT}/api/opportunities\n`);
+
+  // Warm up the local models and backfill any missing embedding vectors
+  scheduleEmbeddingSync();
+  warmUpReranker();
 });
 
 export default app;

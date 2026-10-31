@@ -33,3 +33,6 @@ frontend/next-env.d.ts
 
 # Vercel
 **/.vercel
+
+# Local transformer model weights (downloaded on first run)
+backend/.model-cache/
