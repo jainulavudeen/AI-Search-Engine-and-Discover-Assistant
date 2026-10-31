@@ -30,7 +30,7 @@ import type {
   SearchResponse,
 } from "../types/search";
 import { Prisma } from "@prisma/client";
-import { personalizeSearchResults } from "./recommendationService";
+import { canonicalCity, personalizeSearchResults } from "./recommendationService";
 import { semanticSearch } from "./embeddingService";
 import { rerankPassage, rerankScores } from "./rerankerService";
 import {
@@ -527,6 +527,24 @@ const SEMANTIC_FULL_SCORE_AT = 0.6;
 /** Weight of semantic similarity vs keyword relevance in the hybrid score */
 const SEMANTIC_WEIGHT = 0.6;
 
+/**
+ * Score multiplier for results outside the city the query names. Sentence
+ * embeddings barely encode location ("hackathons in Bangalore" ≈ any
+ * hackathon, cosine ~0.5), so without this the semantic component floods
+ * city queries with events elsewhere. Applied after blending so the 40%
+ * keyword weight doesn't dilute it. Online events count as a mismatch too —
+ * relevant-ish, but not what "in <city>" asked for.
+ */
+const LOCATION_MISMATCH_FACTOR = 0.8;
+
+/** Alias-aware city match ("Bengaluru" matches "Bangalore") */
+function matchesLocation(oppLocation: string, wanted: string): boolean {
+  return (
+    canonicalCity(oppLocation) === canonicalCity(wanted) ||
+    oppLocation.toLowerCase().includes(wanted.toLowerCase())
+  );
+}
+
 type OpportunityRow = Awaited<ReturnType<typeof prisma.opportunity.findMany>>[number];
 
 interface RetrievalResult {
@@ -552,7 +570,10 @@ async function executeSearch(
   const [keywordRows, semanticHits] = await Promise.all([
     prisma.opportunity.findMany({
       where: keywordWhere,
-      orderBy: { relevanceScore: "desc" },
+      // id tiebreak: many rows share the default relevanceScore, and without
+      // it Postgres returns ties in arbitrary order — the top 50 would vary
+      // between identical searches.
+      orderBy: [{ relevanceScore: "desc" }, { id: "asc" }],
       take: RESULT_LIMIT,
     }),
     useSemantic
@@ -616,11 +637,9 @@ function rankResults(
         if (txt.includes(term.toLowerCase())) boost += 5;
       }
 
-      // Boost for exact location match (vs partial)
-      if (
-        intent.location &&
-        r.location.toLowerCase() === intent.location.toLowerCase()
-      ) {
+      // Boost for location match (alias-aware)
+      const locationMismatch = !!intent.location && !matchesLocation(r.location, intent.location);
+      if (intent.location && !locationMismatch) {
         boost += 12;
       }
 
@@ -629,13 +648,12 @@ function rankResults(
 
       const keywordScore = Math.min(r.relevanceScore + boost, 100);
       const sim = similarity?.get(r.id);
-      const searchScore =
+      const blended =
         sim === undefined
           ? keywordScore
-          : Math.round(
-              SEMANTIC_WEIGHT * Math.min(Math.max(sim / SEMANTIC_FULL_SCORE_AT, 0), 1) * 100 +
-                (1 - SEMANTIC_WEIGHT) * keywordScore
-            );
+          : SEMANTIC_WEIGHT * Math.min(Math.max(sim / SEMANTIC_FULL_SCORE_AT, 0), 1) * 100 +
+            (1 - SEMANTIC_WEIGHT) * keywordScore;
+      const searchScore = Math.round(locationMismatch ? blended * LOCATION_MISMATCH_FACTOR : blended);
 
       return {
         id: r.id,

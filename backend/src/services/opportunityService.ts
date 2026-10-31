@@ -267,7 +267,8 @@ export async function getOpportunities(
     const [candidates, total] = await Promise.all([
       prisma.opportunity.findMany({
         where: aiMatchWhere,
-        orderBy: { relevanceScore: "desc" },
+        // id tiebreak keeps the capped candidate set stable across requests
+        orderBy: [{ relevanceScore: "desc" }, { id: "asc" }],
         take: AI_MATCH_CANDIDATE_CAP,
       }),
       prisma.opportunity.count({ where: aiMatchWhere }),

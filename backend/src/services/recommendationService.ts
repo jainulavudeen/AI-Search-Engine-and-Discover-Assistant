@@ -85,7 +85,7 @@ const LOCATION_ALIASES: Record<string, string[]> = {
 };
 
 /** Returns the canonical city name for a raw location string, or the input lowercased. */
-function canonicalCity(raw: string): string {
+export function canonicalCity(raw: string): string {
   const lc = raw.toLowerCase().trim();
   for (const [canonical, aliases] of Object.entries(LOCATION_ALIASES)) {
     if (aliases.some((a) => lc.includes(a))) return canonical;
